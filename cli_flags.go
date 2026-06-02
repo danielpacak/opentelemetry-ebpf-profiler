@@ -79,7 +79,8 @@ var (
 		"captured profiling samples."
 	probeLinkHelper = "Attach a probe to a symbol of an executable. " +
 		"Expected format: probe_type:target[:symbol]. probe_type can be kprobe, kretprobe, uprobe, " +
-		"uretprobe, or lsm. For lsm the format is lsm:<hook> (only file_open is supported)."
+		"uretprobe, or lsm. For lsm the format is lsm:<hook> (file_open and task_alloc " +
+		"are supported)."
 	loadProbeHelper = "Load generic eBPF program that can be attached externally to " +
 		"various user or kernel space hooks."
 	bpffsHelp = fmt.Sprintf("Set the root BPF FS path for pinned maps. Only used for OBI span/trace ID communication. Default is %s",

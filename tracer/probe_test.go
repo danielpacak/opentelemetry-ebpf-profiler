@@ -64,6 +64,15 @@ func TestParseProbe(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		"lsm_task_alloc_valid": {
+			input: "lsm:task_alloc",
+			expected: &ProbeSpec{
+				Type:     ProbeTypeLSM,
+				Symbol:   "task_alloc",
+				ProgName: "lsm__task_alloc",
+			},
+			wantErr: false,
+		},
 		"lsm_missing_hook": {
 			input:   "lsm:",
 			wantErr: true,

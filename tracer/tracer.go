@@ -498,13 +498,34 @@ func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
 		}
 	}
 
-	if hasLSMProbe(cfg.ProbeLinks) {
+	if lsmSpecs := lsmProbeSpecs(cfg.ProbeLinks); len(lsmSpecs) > 0 {
 		// LSM tail-call targets live in a dedicated prog array because a
 		// BPF_MAP_TYPE_PROG_ARRAY only accepts programs sharing the entry's type.
+		// The kernel additionally requires every LSM program in a prog array to
+		// share one attach_func_proto (see bpf_prog_map_compatible), so a single
+		// lsm_progs array can only serve one hook at a time.
+		if len(lsmSpecs) > 1 {
+			return nil, nil, nil, fmt.Errorf("at most one LSM hook can be active at a "+
+				"time, got %d", len(lsmSpecs))
+		}
+		hook := lsmSpecs[0]
+
+		// The compiled LSM unwinders attach to file_open only to obtain a valid
+		// attach BTF id; they never run as security hooks. Retarget them to the
+		// active hook so every program in lsm_progs shares one attach_func_proto.
+		for _, p := range tailCallProgs {
+			if !p.enable {
+				continue
+			}
+			if spec, ok := coll.Programs["lsm_"+p.name]; ok {
+				spec.AttachTo = hook.Symbol
+			}
+		}
+
 		lsmProgs := make([]progLoaderHelper, len(tailCallProgs), len(tailCallProgs)+1)
 		copy(lsmProgs, tailCallProgs)
 		lsmProgs = append(lsmProgs, progLoaderHelper{
-			name:             lsmFileOpenProgName,
+			name:             hook.ProgName,
 			noTailCallTarget: true,
 			enable:           true,
 		})
@@ -877,7 +898,7 @@ func loadProgram(ebpfProgs map[string]*cebpf.Program, tailcallMap *cebpf.Map,
 				log.Errorf("%s", scanner.Text())
 			}
 		}
-		return fmt.Errorf("failed to load %s", progSpec.Name)
+		return fmt.Errorf("failed to load %s: %w", progSpec.Name, err)
 	}
 	ebpfProgs[progSpec.Name] = unwinder
 

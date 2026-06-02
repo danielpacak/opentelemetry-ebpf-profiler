@@ -47,8 +47,12 @@ func (p ProbeType) String() string {
 	}
 }
 
-// lsmFileOpenProgName is the eBPF program attached to the LSM file_open hook.
-const lsmFileOpenProgName = "lsm__file_open"
+// supportedLSMHooks maps a supported LSM hook name to the eBPF program that is
+// attached to it.
+var supportedLSMHooks = map[string]string{
+	"file_open":  "lsm__file_open",
+	"task_alloc": "lsm__task_alloc",
+}
 
 // ProbeSpec defines the specification for attaching an eBPF probe.
 type ProbeSpec struct {
@@ -77,8 +81,9 @@ const genericProgName = "kprobe__generic"
 //   - "uprobe:/usr/bin/bash:readline"
 //   - "uretprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc"
 //   - "lsm:file_open"
+//   - "lsm:task_alloc"
 //
-// Only the "file_open" LSM hook is currently supported.
+// Only the "file_open" and "task_alloc" LSM hooks are currently supported.
 func ParseProbe(spec string) (*ProbeSpec, error) {
 	var parts [3]string
 	n := stringutil.SplitN(spec, ":", parts[:])
@@ -130,13 +135,15 @@ func ParseProbe(spec string) (*ProbeSpec, error) {
 		if n != 2 || parts[1] == "" {
 			return nil, fmt.Errorf("invalid format: %s, expected: lsm:<hook>", spec)
 		}
-		if parts[1] != "file_open" {
-			return nil, fmt.Errorf("unsupported LSM hook: %s, only file_open is supported", parts[1])
+		progName, ok := supportedLSMHooks[parts[1]]
+		if !ok {
+			return nil, fmt.Errorf("unsupported LSM hook: %s, only file_open and task_alloc "+
+				"are supported", parts[1])
 		}
 		return &ProbeSpec{
 			Type:     probeType,
 			Symbol:   parts[1],
-			ProgName: lsmFileOpenProgName,
+			ProgName: progName,
 		}, nil
 
 	default:
@@ -144,16 +151,25 @@ func ParseProbe(spec string) (*ProbeSpec, error) {
 	}
 }
 
-// hasLSMProbe reports whether any of the given probe link specifications targets
-// an LSM hook. It is used to decide whether the LSM eBPF programs need to be
-// loaded, which require a kernel with BPF LSM support.
-func hasLSMProbe(probeLinks []string) bool {
+// lsmProbeSpecs returns the distinct LSM probe specifications referenced by the
+// given probe link specifications, deduplicated by hook. The result decides
+// whether the LSM eBPF programs need to be loaded (they require a kernel with
+// BPF LSM support) and which entry program and attach hook to use.
+func lsmProbeSpecs(probeLinks []string) []*ProbeSpec {
+	seen := make(map[string]struct{})
+	var specs []*ProbeSpec
 	for _, probeStr := range probeLinks {
-		if spec, err := ParseProbe(probeStr); err == nil && spec.Type == ProbeTypeLSM {
-			return true
+		spec, err := ParseProbe(probeStr)
+		if err != nil || spec.Type != ProbeTypeLSM {
+			continue
 		}
+		if _, ok := seen[spec.Symbol]; ok {
+			continue
+		}
+		seen[spec.Symbol] = struct{}{}
+		specs = append(specs, spec)
 	}
-	return false
+	return specs
 }
 
 // AttachProbe attaches an eBPF program to the kernel or user-space based on the probe specification.
