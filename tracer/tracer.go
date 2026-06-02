@@ -460,7 +460,7 @@ func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
 	if cfg.OffCPUThreshold > 0 || len(cfg.ProbeLinks) > 0 || cfg.LoadProbe {
 		// Load the tail call destinations if any kind of event profiling is enabled.
 		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["kprobe_progs"], tailCallProgs,
-			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD()); err != nil {
+			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD(), "kprobe_"); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to load kprobe eBPF programs: %v", err)
 		}
 	}
@@ -479,7 +479,7 @@ func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
 			},
 		}
 		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["kprobe_progs"], offCPUProgs,
-			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD()); err != nil {
+			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD(), "kprobe_"); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to load kprobe eBPF programs: %v", err)
 		}
 	}
@@ -493,8 +493,24 @@ func initializeMapsAndPrograms(kmod *kallsyms.Module, cfg *Config) (
 			},
 		}
 		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["kprobe_progs"], probeProgs,
-			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD()); err != nil {
+			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD(), "kprobe_"); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to load uprobe eBPF programs: %v", err)
+		}
+	}
+
+	if hasLSMProbe(cfg.ProbeLinks) {
+		// LSM tail-call targets live in a dedicated prog array because a
+		// BPF_MAP_TYPE_PROG_ARRAY only accepts programs sharing the entry's type.
+		lsmProgs := make([]progLoaderHelper, len(tailCallProgs), len(tailCallProgs)+1)
+		copy(lsmProgs, tailCallProgs)
+		lsmProgs = append(lsmProgs, progLoaderHelper{
+			name:             lsmFileOpenProgName,
+			noTailCallTarget: true,
+			enable:           true,
+		})
+		if err = loadProbeUnwinders(coll, ebpfProgs, ebpfMaps["lsm_progs"], lsmProgs,
+			cfg.BPFVerifierLogLevel, ebpfMaps["perf_progs"].FD(), "lsm_"); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to load lsm eBPF programs: %v", err)
 		}
 	}
 
@@ -796,7 +812,7 @@ func progArrayReferences(perfTailCallMapFD int, insns asm.Instructions) []int {
 // specification of these programs to xProbe eBPF programs and adjusts tail call maps.
 func loadProbeUnwinders(coll *cebpf.CollectionSpec, ebpfProgs map[string]*cebpf.Program,
 	tailcallMap *cebpf.Map, progs []progLoaderHelper,
-	bpfVerifierLogLevel uint32, perfTailCallMapFD int,
+	bpfVerifierLogLevel uint32, perfTailCallMapFD int, progPrefix string,
 ) error {
 	programOptions := cebpf.ProgramOptions{
 		LogLevel: cebpf.LogLevel(bpfVerifierLogLevel),
@@ -809,7 +825,7 @@ func loadProbeUnwinders(coll *cebpf.CollectionSpec, ebpfProgs map[string]*cebpf.
 
 		unwindProgName := unwindProg.name
 		if !unwindProg.noTailCallTarget {
-			unwindProgName = "kprobe_" + unwindProg.name
+			unwindProgName = progPrefix + unwindProg.name
 		}
 
 		progSpec, ok := coll.Programs[unwindProgName]

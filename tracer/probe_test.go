@@ -55,6 +55,25 @@ func TestParseProbe(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		"lsm_valid": {
+			input: "lsm:file_open",
+			expected: &ProbeSpec{
+				Type:     ProbeTypeLSM,
+				Symbol:   "file_open",
+				ProgName: "lsm__file_open",
+			},
+			wantErr: false,
+		},
+		"lsm_missing_hook": {
+			input:   "lsm:",
+			wantErr: true,
+			errMsg:  "invalid format",
+		},
+		"lsm_unsupported_hook": {
+			input:   "lsm:bprm_check_security",
+			wantErr: true,
+			errMsg:  "unsupported LSM hook",
+		},
 		"kprobe_missing_symbol": {
 			input:   "kprobe:",
 			wantErr: true,

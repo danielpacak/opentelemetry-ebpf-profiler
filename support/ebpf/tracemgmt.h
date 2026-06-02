@@ -15,8 +15,15 @@
 
 #else // TESTING_COREDUMP
 
-  // MULTI_USE_FUNC generates perf event and kprobe eBPF programs
+  // MULTI_USE_FUNC generates perf event, kprobe and LSM eBPF programs
   // for a given function.
+  //
+  // The LSM variant exists so the unwinders can serve as tail-call targets for an
+  // LSM entry program: a BPF_MAP_TYPE_PROG_ARRAY only accepts programs that share
+  // the calling program's type, so LSM entries need LSM-typed unwinders. All LSM
+  // variants attach to the file_open hook purely to obtain a valid attach BTF id
+  // and return 0 (allow) so they never affect the security verdict; the unwinder's
+  // own return value is intentionally discarded.
   #define MULTI_USE_FUNC(func_name)                                                                \
     SEC("perf_event/" #func_name)                                                                  \
     static int EBPF_INLINE perf_##func_name(struct pt_regs *ctx)                                   \
@@ -28,6 +35,13 @@
     static int EBPF_INLINE kprobe_##func_name(struct pt_regs *ctx)                                 \
     {                                                                                              \
       return func_name(ctx);                                                                       \
+    }                                                                                              \
+                                                                                                   \
+    SEC("lsm/file_open")                                                                           \
+    static int EBPF_INLINE lsm_##func_name(struct pt_regs *ctx)                                    \
+    {                                                                                              \
+      func_name(ctx);                                                                              \
+      return 0;                                                                                    \
     }
 
 #endif // TESTING_COREDUMP
@@ -755,7 +769,10 @@ get_usermode_regs(struct pt_regs *ctx, UnwindState *state, bool *has_usermode_re
 {
   ErrorCode error;
 
-  if (!ptregs_is_usermode(ctx)) {
+  // A NULL ctx means the caller has no usermode register context to offer (e.g.
+  // an LSM hook, whose context is not a struct pt_regs). In that case resolve the
+  // current task's entry pt_regs, same as for an interrupted kernel-mode context.
+  if (ctx == NULL || !ptregs_is_usermode(ctx)) {
     // Use the current task's entry pt_regs
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     long ptregs_addr         = get_task_pt_regs(task);
@@ -796,8 +813,16 @@ get_usermode_regs(struct pt_regs *ctx, UnwindState *state, bool *has_usermode_re
 
 #endif // TESTING_COREDUMP
 
-static inline EBPF_INLINE int collect_trace(
-  struct pt_regs *ctx, TraceOrigin origin, u32 pid, u32 tid, u64 trace_timestamp, u64 value)
+// collect_trace_ctx is the generic trace entry point. It separates the program
+// context used for kernel-stack capture and tail calls (ctx) from the register
+// context used to seed user-mode unwinding (regs_ctx).
+//
+// For kprobe/uprobe/perf_event programs ctx and regs_ctx are the same struct
+// pt_regs. For LSM programs the context is not a struct pt_regs, so callers pass
+// regs_ctx == NULL and the user-mode registers are resolved from the current task.
+static inline EBPF_INLINE int collect_trace_ctx(
+  void *ctx, struct pt_regs *regs_ctx, TraceOrigin origin, u32 pid, u32 tid, u64 trace_timestamp,
+  u64 value)
 {
   // The trace is reused on each call to this function so we have to reset the
   // variables used to maintain state.
@@ -828,7 +853,7 @@ static inline EBPF_INLINE int collect_trace(
   // Recursive unwind frames
   int unwinder           = PROG_UNWIND_STOP;
   bool has_usermode_regs = false;
-  ErrorCode error        = get_usermode_regs(ctx, &record->state, &has_usermode_regs);
+  ErrorCode error        = get_usermode_regs(regs_ctx, &record->state, &has_usermode_regs);
   if (error || !has_usermode_regs) {
     goto exit;
   }
@@ -849,6 +874,15 @@ exit:
   tail_call(ctx, unwinder);
   DEBUG_PRINT("bpf_tail call failed for %d in native_tracer_entry", unwinder);
   return -1;
+}
+
+// collect_trace is the entry point for programs whose context is a struct pt_regs
+// (kprobe/uprobe/perf_event), where the same context provides both the kernel
+// stack and the user-mode registers.
+static inline EBPF_INLINE int collect_trace(
+  struct pt_regs *ctx, TraceOrigin origin, u32 pid, u32 tid, u64 trace_timestamp, u64 value)
+{
+  return collect_trace_ctx(ctx, ctx, origin, pid, tid, trace_timestamp, value);
 }
 
 #endif

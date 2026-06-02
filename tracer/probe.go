@@ -25,6 +25,8 @@ const (
 	ProbeTypeUprobe
 	// ProbeTypeUretprobe represents a user-space return probe.
 	ProbeTypeUretprobe
+	// ProbeTypeLSM represents a Linux Security Module hook probe.
+	ProbeTypeLSM
 )
 
 // String returns the string representation of the probe type.
@@ -38,10 +40,15 @@ func (p ProbeType) String() string {
 		return "uprobe"
 	case ProbeTypeUretprobe:
 		return "uretprobe"
+	case ProbeTypeLSM:
+		return "lsm"
 	default:
 		return "unknown"
 	}
 }
+
+// lsmFileOpenProgName is the eBPF program attached to the LSM file_open hook.
+const lsmFileOpenProgName = "lsm__file_open"
 
 // ProbeSpec defines the specification for attaching an eBPF probe.
 type ProbeSpec struct {
@@ -62,12 +69,16 @@ const genericProgName = "kprobe__generic"
 // The expected format is:
 //   - For kernel probes: "kprobe:<symbol>" or "kretprobe:<symbol>"
 //   - For user-space probes: "uprobe:<target>:<symbol>" or "uretprobe:<target>:<symbol>"
+//   - For LSM probes: "lsm:<hook>"
 //
 // The probe type is case-insensitive. Examples:
 //   - "kprobe:do_sys_open"
 //   - "kretprobe:tcp_connect"
 //   - "uprobe:/usr/bin/bash:readline"
 //   - "uretprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc"
+//   - "lsm:file_open"
+//
+// Only the "file_open" LSM hook is currently supported.
 func ParseProbe(spec string) (*ProbeSpec, error) {
 	var parts [3]string
 	n := stringutil.SplitN(spec, ":", parts[:])
@@ -87,6 +98,8 @@ func ParseProbe(spec string) (*ProbeSpec, error) {
 		probeType = ProbeTypeUprobe
 	case "uretprobe":
 		probeType = ProbeTypeUretprobe
+	case "lsm":
+		probeType = ProbeTypeLSM
 	default:
 		return nil, fmt.Errorf("unknown probe type: %s", parts[0])
 	}
@@ -113,9 +126,34 @@ func ParseProbe(spec string) (*ProbeSpec, error) {
 			ProgName: genericProgName,
 		}, nil
 
+	case ProbeTypeLSM:
+		if n != 2 || parts[1] == "" {
+			return nil, fmt.Errorf("invalid format: %s, expected: lsm:<hook>", spec)
+		}
+		if parts[1] != "file_open" {
+			return nil, fmt.Errorf("unsupported LSM hook: %s, only file_open is supported", parts[1])
+		}
+		return &ProbeSpec{
+			Type:     probeType,
+			Symbol:   parts[1],
+			ProgName: lsmFileOpenProgName,
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("unsupported probe type: %s", probeTypeStr)
 	}
+}
+
+// hasLSMProbe reports whether any of the given probe link specifications targets
+// an LSM hook. It is used to decide whether the LSM eBPF programs need to be
+// loaded, which require a kernel with BPF LSM support.
+func hasLSMProbe(probeLinks []string) bool {
+	for _, probeStr := range probeLinks {
+		if spec, err := ParseProbe(probeStr); err == nil && spec.Type == ProbeTypeLSM {
+			return true
+		}
+	}
+	return false
 }
 
 // AttachProbe attaches an eBPF program to the kernel or user-space based on the probe specification.
@@ -144,6 +182,8 @@ func AttachProbe(prog *ebpf.Program, spec *ProbeSpec) (link.Link, error) {
 			return nil, err
 		}
 		return ex.Uretprobe(spec.Symbol, prog, nil)
+	case ProbeTypeLSM:
+		return link.AttachLSM(link.LSMOptions{Program: prog})
 	}
 	return nil, fmt.Errorf("unsupported probe type: %s", spec.Type)
 }
